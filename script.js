@@ -6,7 +6,8 @@ let torchOn = false;
 let cap = null;
 
 // OpenCV 全域矩陣
-let src, gray, blurred, edges, dilated, contours, hierarchy;
+let src, gray, blurred, edges, contours, hierarchy;
+let srcSmall; // 用於快速偵測的小尺寸矩陣
 
 async function onOpenCvReady() {
     isOpenCvReady = true;
@@ -23,8 +24,8 @@ async function startCamera() {
         const constraints = {
             video: {
                 facingMode: 'environment',
-                width: { ideal: 1920 },
-                height: { ideal: 1080 }
+                width: { ideal: 1280 },
+                height: { ideal: 720 }
             },
             audio: false
         };
@@ -34,10 +35,10 @@ async function startCamera() {
         video.onloadedmetadata = () => {
             // 初始化 OpenCV 資源
             src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
+            srcSmall = new cv.Mat(300, 300 * (video.videoWidth / video.videoHeight), cv.CV_8UC4);
             gray = new cv.Mat();
             blurred = new cv.Mat();
             edges = new cv.Mat();
-            dilated = new cv.Mat();
             contours = new cv.MatVector();
             hierarchy = new cv.Mat();
             cap = new cv.VideoCapture(video);
@@ -57,9 +58,6 @@ function resizeOverlay() {
     overlay.height = window.innerHeight;
 }
 
-/**
- * 核心偵測迴圈
- */
 function processVideoFrame() {
     if (!isOpenCvReady || !video || video.paused || video.ended) {
         requestAnimationFrame(processVideoFrame);
@@ -69,17 +67,18 @@ function processVideoFrame() {
     try {
         cap.read(src);
 
-        // 影像增強處理
-        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-        cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
-        cv.Canny(blurred, edges, 75, 200);
+        // 為了速度，先將圖片縮小再偵測
+        cv.resize(src, srcSmall, new cv.Size(srcSmall.cols, srcSmall.rows));
 
-        // 關鍵：膨脹邊緣，讓虛線變實線，更容易偵測到方框
+        cv.cvtColor(srcSmall, gray, cv.COLOR_RGBA2GRAY);
+        cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+        cv.Canny(blurred, edges, 50, 150);
+
         let M = cv.Mat.ones(3, 3, cv.CV_8U);
-        cv.dilate(edges, dilated, M);
+        cv.dilate(edges, edges, M);
         M.delete();
 
-        cv.findContours(dilated, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+        cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
         let maxArea = 0;
         let bestPoly = null;
@@ -87,7 +86,7 @@ function processVideoFrame() {
         for (let i = 0; i < contours.size(); ++i) {
             let cnt = contours.get(i);
             let area = cv.contourArea(cnt);
-            if (area > (video.videoWidth * video.videoHeight * 0.05)) {
+            if (area > (srcSmall.cols * srcSmall.rows * 0.05)) {
                 let peri = cv.arcLength(cnt, true);
                 let approx = new cv.Mat();
                 cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
@@ -102,35 +101,20 @@ function processVideoFrame() {
             }
         }
 
-        // 繪製藍色框框 (包含 object-fit: cover 的座標轉換)
         oCtx.clearRect(0, 0, overlay.width, overlay.height);
 
         if (bestPoly) {
-            const videoRatio = video.videoWidth / video.videoHeight;
-            const screenRatio = overlay.width / overlay.height;
-
-            let drawWidth, drawHeight, offsetX = 0, offsetY = 0;
-
-            if (screenRatio > videoRatio) {
-                drawWidth = overlay.width;
-                drawHeight = overlay.width / videoRatio;
-                offsetY = (overlay.height - drawHeight) / 2;
-            } else {
-                drawHeight = overlay.height;
-                drawWidth = overlay.height * videoRatio;
-                offsetX = (overlay.width - drawWidth) / 2;
-            }
-
-            const scaleX = drawWidth / video.videoWidth;
-            const scaleY = drawHeight / video.videoHeight;
+            // 座標轉換：從 srcSmall 的小尺寸轉回畫面的實際尺寸
+            const scaleX = overlay.width / srcSmall.cols;
+            const scaleY = overlay.height / srcSmall.rows;
 
             oCtx.strokeStyle = "#0071e3";
             oCtx.lineWidth = 6;
             oCtx.beginPath();
 
             for (let i = 0; i < 4; i++) {
-                let x = bestPoly.data32S[i * 2] * scaleX + offsetX;
-                let y = bestPoly.data32S[i * 2 + 1] * scaleY + offsetY;
+                let x = bestPoly.data32S[i * 2] * scaleX;
+                let y = bestPoly.data32S[i * 2 + 1] * scaleY;
                 if (i === 0) oCtx.moveTo(x, y);
                 else oCtx.lineTo(x, y);
             }
@@ -138,20 +122,20 @@ function processVideoFrame() {
             oCtx.stroke();
 
             bestPoly.delete();
-            document.getElementById('statusText').innerText = "已偵測到講義";
+            document.getElementById('statusText').innerText = "已鎖定講義";
             document.getElementById('statusText').style.color = "#00ff00";
         } else {
-            document.getElementById('statusText').innerText = "正在尋找講義...";
+            document.getElementById('statusText').innerText = "正在對準講義...";
             document.getElementById('statusText').style.color = "white";
         }
     } catch (e) {
-        console.error(e);
+        console.log("OpenCV Error");
     }
 
     requestAnimationFrame(processVideoFrame);
 }
 
-// 拍照功能
+// 拍照與去陰影功能
 function processAndSaveImage(source) {
     const canvas = document.createElement('canvas');
     canvas.width = source.videoWidth || source.width;
