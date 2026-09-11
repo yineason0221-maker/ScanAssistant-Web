@@ -3,15 +3,14 @@ let isOpenCvReady = false;
 let stream = null;
 let capturedPages = [];
 let torchOn = false;
-let cap = null;
 
-// OpenCV 全域矩陣
+// OpenCV 資源
 let src, gray, blurred, edges, contours, hierarchy;
-let srcSmall; // 用於快速偵測的小尺寸矩陣
+let processCanvas;
 
 async function onOpenCvReady() {
     isOpenCvReady = true;
-    document.getElementById('statusText').innerText = "系統已就緒";
+    document.getElementById('statusText').innerText = "掃描引擎已就緒";
     startCamera();
 }
 
@@ -19,60 +18,53 @@ async function startCamera() {
     video = document.getElementById('video');
     overlay = document.getElementById('overlay');
     oCtx = overlay.getContext('2d');
+    processCanvas = document.createElement('canvas');
 
     try {
-        const constraints = {
-            video: {
-                facingMode: 'environment',
-                width: { ideal: 1280 },
-                height: { ideal: 720 }
-            },
+        stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
             audio: false
-        };
-        stream = await navigator.mediaDevices.getUserMedia(constraints);
+        });
         video.srcObject = stream;
 
         video.onloadedmetadata = () => {
-            // 初始化 OpenCV 資源
-            src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
-            srcSmall = new cv.Mat(300, 300 * (video.videoWidth / video.videoHeight), cv.CV_8UC4);
+            // 初始化畫布大小
+            overlay.width = window.innerWidth;
+            overlay.height = window.innerHeight;
+
+            // 初始化 OpenCV 矩陣 (使用較小尺寸以提升速度)
+            src = new cv.Mat(300, 300 * (video.videoWidth / video.videoHeight), cv.CV_8UC4);
             gray = new cv.Mat();
             blurred = new cv.Mat();
             edges = new cv.Mat();
             contours = new cv.MatVector();
             hierarchy = new cv.Mat();
-            cap = new cv.VideoCapture(video);
 
-            resizeOverlay();
-            window.addEventListener('resize', resizeOverlay);
-
-            requestAnimationFrame(processVideoFrame);
+            requestAnimationFrame(detectionLoop);
         };
     } catch (err) {
-        document.getElementById('statusText').innerText = "相機啟動失敗";
+        document.getElementById('statusText').innerText = "無法存取相機";
     }
 }
 
-function resizeOverlay() {
-    overlay.width = window.innerWidth;
-    overlay.height = window.innerHeight;
-}
-
-function processVideoFrame() {
+function detectionLoop() {
     if (!isOpenCvReady || !video || video.paused || video.ended) {
-        requestAnimationFrame(processVideoFrame);
+        requestAnimationFrame(detectionLoop);
         return;
     }
 
     try {
-        cap.read(src);
+        // 1. 將影片縮小並讀入 OpenCV
+        processCanvas.width = src.cols;
+        processCanvas.height = src.rows;
+        const pCtx = processCanvas.getContext('2d');
+        pCtx.drawImage(video, 0, 0, src.cols, src.rows);
+        src.data.set(pCtx.getImageData(0, 0, src.cols, src.rows).data);
 
-        // 為了速度，先將圖片縮小再偵測
-        cv.resize(src, srcSmall, new cv.Size(srcSmall.cols, srcSmall.rows));
-
-        cv.cvtColor(srcSmall, gray, cv.COLOR_RGBA2GRAY);
+        // 2. 邊緣偵測邏輯
+        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
         cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
-        cv.Canny(blurred, edges, 50, 150);
+        cv.Canny(blurred, edges, 75, 200);
 
         let M = cv.Mat.ones(3, 3, cv.CV_8U);
         cv.dilate(edges, edges, M);
@@ -86,7 +78,7 @@ function processVideoFrame() {
         for (let i = 0; i < contours.size(); ++i) {
             let cnt = contours.get(i);
             let area = cv.contourArea(cnt);
-            if (area > (srcSmall.cols * srcSmall.rows * 0.05)) {
+            if (area > (src.cols * src.rows * 0.05)) {
                 let peri = cv.arcLength(cnt, true);
                 let approx = new cv.Mat();
                 cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
@@ -101,20 +93,37 @@ function processVideoFrame() {
             }
         }
 
+        // 3. 繪製藍色框框 (座標轉換)
         oCtx.clearRect(0, 0, overlay.width, overlay.height);
 
         if (bestPoly) {
-            // 座標轉換：從 srcSmall 的小尺寸轉回畫面的實際尺寸
-            const scaleX = overlay.width / srcSmall.cols;
-            const scaleY = overlay.height / srcSmall.rows;
+            // 計算 object-fit: cover 下的對齊
+            const videoRatio = video.videoWidth / video.videoHeight;
+            const screenRatio = window.innerWidth / window.innerHeight;
+
+            let drawW, drawH, offX = 0, offY = 0;
+            if (screenRatio > videoRatio) {
+                drawW = window.innerWidth;
+                drawH = window.innerWidth / videoRatio;
+                offY = (window.innerHeight - drawH) / 2;
+            } else {
+                drawH = window.innerHeight;
+                drawW = window.innerHeight * videoRatio;
+                offX = (window.innerWidth - drawW) / 2;
+            }
+
+            const scaleX = drawW / src.cols;
+            const scaleY = drawH / src.rows;
 
             oCtx.strokeStyle = "#0071e3";
             oCtx.lineWidth = 6;
+            oCtx.shadowBlur = 15;
+            oCtx.shadowColor = "#0071e3";
             oCtx.beginPath();
 
             for (let i = 0; i < 4; i++) {
-                let x = bestPoly.data32S[i * 2] * scaleX;
-                let y = bestPoly.data32S[i * 2 + 1] * scaleY;
+                let x = bestPoly.data32S[i * 2] * scaleX + offX;
+                let y = bestPoly.data32S[i * 2 + 1] * scaleY + offY;
                 if (i === 0) oCtx.moveTo(x, y);
                 else oCtx.lineTo(x, y);
             }
@@ -122,21 +131,28 @@ function processVideoFrame() {
             oCtx.stroke();
 
             bestPoly.delete();
-            document.getElementById('statusText').innerText = "已鎖定講義";
-            document.getElementById('statusText').style.color = "#00ff00";
+            document.getElementById('statusText').innerText = "已偵測到講義";
         } else {
-            document.getElementById('statusText').innerText = "正在對準講義...";
-            document.getElementById('statusText').style.color = "white";
+            document.getElementById('statusText').innerText = "請對準講義";
         }
     } catch (e) {
-        console.log("OpenCV Error");
+        // 忽略 OpenCV 初始化的錯誤
     }
 
-    requestAnimationFrame(processVideoFrame);
+    requestAnimationFrame(detectionLoop);
 }
 
-// 拍照與去陰影功能
-function processAndSaveImage(source) {
+// 拍照處理
+function captureImage(source) {
+    // 拍照閃光效果
+    const flash = document.createElement('div');
+    flash.style.position = 'fixed';
+    flash.style.top = '0'; flash.style.left = '0';
+    flash.style.width = '100%'; flash.style.height = '100%';
+    flash.style.backgroundColor = 'white'; flash.style.zIndex = '9999';
+    document.body.appendChild(flash);
+    setTimeout(() => flash.remove(), 100);
+
     const canvas = document.createElement('canvas');
     canvas.width = source.videoWidth || source.width;
     canvas.height = source.videoHeight || source.height;
@@ -151,40 +167,37 @@ function processAndSaveImage(source) {
     cv.imshow(canvas, snapDst);
     const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
     capturedPages.push(dataUrl);
-    updatePreview(dataUrl);
+
+    // 更新縮圖
+    const thumb = document.getElementById('lastScanThumb');
+    thumb.src = dataUrl;
+    thumb.style.display = 'block';
+    document.getElementById('pageCountBadge').innerText = capturedPages.length;
+    document.getElementById('pageCountBadge').style.display = 'flex';
 
     snapSrc.delete(); snapDst.delete();
     if (window.navigator.vibrate) window.navigator.vibrate(50);
 }
 
-document.getElementById('btnCapture').addEventListener('click', () => processAndSaveImage(video));
-document.getElementById('miniPreview').addEventListener('click', showResultPanel);
+document.getElementById('btnCapture').addEventListener('click', () => captureImage(video));
 document.getElementById('btnGallery').addEventListener('click', () => document.getElementById('galleryInput').click());
 document.getElementById('galleryInput').addEventListener('change', async (e) => {
     for (let file of e.target.files) {
-        const img = await new Promise(resolve => {
+        const img = await new Promise(res => {
             const reader = new FileReader();
             reader.onload = (e) => {
                 const img = new Image();
-                img.onload = () => resolve(img);
+                img.onload = () => res(img);
                 img.src = e.target.result;
             };
             reader.readAsDataURL(file);
         });
-        processAndSaveImage(img);
+        captureImage(img);
     }
 });
 
-function updatePreview(dataUrl) {
-    const thumb = document.getElementById('lastScanThumb');
-    const badge = document.getElementById('pageCountBadge');
-    thumb.src = dataUrl;
-    thumb.style.display = 'block';
-    badge.innerText = capturedPages.length;
-    badge.style.display = 'flex';
-}
-
-function showResultPanel() {
+function showResults() {
+    if (capturedPages.length === 0) return;
     const list = document.getElementById('finalPreviewList');
     list.innerHTML = "";
     capturedPages.forEach(url => {
@@ -196,18 +209,16 @@ function showResultPanel() {
     document.getElementById('resultPanel').style.display = 'flex';
 }
 
-document.getElementById('btnDone').addEventListener('click', showResultPanel);
+document.getElementById('btnDone').addEventListener('click', showResults);
+document.getElementById('miniPreview').addEventListener('click', showResults);
 
 document.getElementById('btnTorch').addEventListener('click', async () => {
     if (!stream) return;
     const track = stream.getVideoTracks()[0];
     try {
-        const capabilities = track.getCapabilities();
-        if (capabilities.torch) {
-            torchOn = !torchOn;
-            await track.applyConstraints({ advanced: [{ torch: torchOn }] });
-            document.getElementById('btnTorch').style.color = torchOn ? "#ffcc00" : "white";
-        }
+        torchOn = !torchOn;
+        await track.applyConstraints({ advanced: [{ torch: torchOn }] });
+        document.getElementById('btnTorch').style.color = torchOn ? "#ffcc00" : "white";
     } catch (e) { alert("此設備不支援手電筒"); }
 });
 
@@ -217,13 +228,18 @@ document.getElementById('exportPdf').addEventListener('click', () => {
     capturedPages.forEach((url, i) => {
         if (i > 0) doc.addPage();
         const imgProps = doc.getImageProperties(url);
-        const pdfWidth = doc.internal.pageSize.getWidth();
-        const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
-        doc.addImage(url, 'JPEG', 0, 0, pdfWidth, pdfHeight);
+        const pdfW = doc.internal.pageSize.getWidth();
+        const pdfH = (imgProps.height * pdfW) / imgProps.width;
+        doc.addImage(url, 'JPEG', 0, 0, pdfW, pdfH);
     });
     doc.save("Scan_Assignment.pdf");
 });
 
 document.getElementById('closeModal').addEventListener('click', () => {
     document.getElementById('resultPanel').style.display = 'none';
+});
+
+window.addEventListener('resize', () => {
+    overlay.width = window.innerWidth;
+    overlay.height = window.innerHeight;
 });
