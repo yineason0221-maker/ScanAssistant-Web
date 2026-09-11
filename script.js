@@ -4,7 +4,7 @@ let stream = null;
 let capturedPages = [];
 let torchOn = false;
 
-// OpenCV 全域變數，避免重複建立導致記憶體洩漏
+// OpenCV 全域變數
 let src, gray, blurred, edges, contours, hierarchy;
 
 async function onOpenCvReady() {
@@ -39,10 +39,10 @@ async function startCamera() {
             contours = new cv.MatVector();
             hierarchy = new cv.Mat();
 
-            // 調整疊加層以匹配影片顯示的大小
             resizeOverlay();
             window.addEventListener('resize', resizeOverlay);
 
+            // 開始偵測迴圈
             requestAnimationFrame(processVideoFrame);
         };
     } catch (err) {
@@ -60,99 +60,96 @@ function resizeOverlay() {
 }
 
 function processVideoFrame() {
-    if (!isOpenCvReady || video.paused || video.ended) {
+    if (!isOpenCvReady || !video || video.paused || video.ended) {
         requestAnimationFrame(processVideoFrame);
         return;
     }
 
-    // 1. 將影片讀入 OpenCV
-    const tempCanvas = document.createElement('canvas');
-    tempCanvas.width = video.videoWidth;
-    tempCanvas.height = video.videoHeight;
-    const tCtx = tempCanvas.getContext('2d');
-    tCtx.drawImage(video, 0, 0);
-    src.data.set(tCtx.getImageData(0, 0, video.videoWidth, video.videoHeight).data);
+    try {
+        // 直接從影片讀取畫面到 OpenCV
+        const cap = new cv.VideoCapture(video);
+        cap.read(src);
 
-    // 2. 影像處理
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
-    cv.Canny(blurred, edges, 75, 200);
+        // 影像處理
+        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+        cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+        cv.Canny(blurred, edges, 75, 200);
 
-    // 3. 尋找輪廓
-    cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+        // 尋找輪廓
+        cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
 
-    let maxArea = 0;
-    let bestPoly = null;
+        let maxArea = 0;
+        let bestPoly = null;
 
-    for (let i = 0; i < contours.size(); ++i) {
-        let cnt = contours.get(i);
-        let area = cv.contourArea(cnt);
-        if (area > (video.videoWidth * video.videoHeight * 0.1)) {
-            let peri = cv.arcLength(cnt, true);
-            let approx = new cv.Mat();
-            cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
+        for (let i = 0; i < contours.size(); ++i) {
+            let cnt = contours.get(i);
+            let area = cv.contourArea(cnt);
+            // 只要面積佔畫面 5% 以上就列入考慮，降低門檻
+            if (area > (video.videoWidth * video.videoHeight * 0.05)) {
+                let peri = cv.arcLength(cnt, true);
+                let approx = new cv.Mat();
+                cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
 
-            if (approx.rows === 4 && area > maxArea) {
-                maxArea = area;
-                if (bestPoly) bestPoly.delete();
-                bestPoly = approx;
-            } else {
-                approx.delete();
+                if (approx.rows === 4 && area > maxArea) {
+                    maxArea = area;
+                    if (bestPoly) bestPoly.delete();
+                    bestPoly = approx;
+                } else {
+                    approx.delete();
+                }
             }
         }
-    }
 
-    // 4. 繪製藍色框框 (需要座標轉換)
-    oCtx.clearRect(0, 0, overlay.width, overlay.height);
-    if (bestPoly) {
-        // 計算比例縮放
-        const scaleX = overlay.width / video.videoWidth;
-        const scaleY = overlay.height / video.videoHeight;
+        // 繪製藍色框框
+        oCtx.clearRect(0, 0, overlay.width, overlay.height);
+        if (bestPoly) {
+            const scaleX = overlay.width / video.videoWidth;
+            const scaleY = overlay.height / video.videoHeight;
 
-        oCtx.strokeStyle = "#0071e3";
-        oCtx.lineWidth = 4;
-        oCtx.lineJoin = "round";
-        oCtx.beginPath();
-
-        for (let i = 0; i < 4; i++) {
-            let x = bestPoly.data32S[i * 2] * scaleX;
-            let y = bestPoly.data32S[i * 2 + 1] * scaleY;
-            if (i === 0) oCtx.moveTo(x, y);
-            else oCtx.lineTo(x, y);
-        }
-        oCtx.closePath();
-        oCtx.stroke();
-
-        // 畫四個角點強化視覺
-        oCtx.fillStyle = "white";
-        for (let i = 0; i < 4; i++) {
-            let x = bestPoly.data32S[i * 2] * scaleX;
-            let y = bestPoly.data32S[i * 2 + 1] * scaleY;
+            oCtx.strokeStyle = "#0071e3";
+            oCtx.lineWidth = 6;
+            oCtx.lineJoin = "round";
             oCtx.beginPath();
-            oCtx.arc(x, y, 6, 0, Math.PI * 2);
-            oCtx.fill();
-        }
 
-        bestPoly.delete();
+            for (let i = 0; i < 4; i++) {
+                let x = bestPoly.data32S[i * 2] * scaleX;
+                let y = bestPoly.data32S[i * 2 + 1] * scaleY;
+                if (i === 0) oCtx.moveTo(x, y);
+                else oCtx.lineTo(x, y);
+            }
+            oCtx.closePath();
+            oCtx.stroke();
+
+            // 畫四個角點
+            oCtx.fillStyle = "white";
+            for (let i = 0; i < 4; i++) {
+                let x = bestPoly.data32S[i * 2] * scaleX;
+                let y = bestPoly.data32S[i * 2 + 1] * scaleY;
+                oCtx.beginPath();
+                oCtx.arc(x, y, 8, 0, Math.PI * 2);
+                oCtx.fill();
+            }
+            bestPoly.delete();
+        }
+    } catch (e) {
+        console.error("OpenCV Frame Error:", e);
     }
 
     requestAnimationFrame(processVideoFrame);
 }
 
-// 拍照與去陰影
-document.getElementById('btnCapture').addEventListener('click', () => {
+// 拍照與去陰影功能
+function processAndSaveImage(source) {
     const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    canvas.width = source.videoWidth || source.width;
+    canvas.height = source.videoHeight || source.height;
     const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0);
+    ctx.drawImage(source, 0, 0);
 
-    // 執行去陰影濾鏡
     let snapSrc = cv.imread(canvas);
     let snapDst = new cv.Mat();
     cv.cvtColor(snapSrc, snapDst, cv.COLOR_RGBA2GRAY);
-
-    // 自適應二值化 (Block Size 必須是奇數)
+    // 去陰影核心：自適應二值化
     cv.adaptiveThreshold(snapDst, snapDst, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 21, 15);
 
     cv.imshow(canvas, snapDst);
@@ -164,8 +161,39 @@ document.getElementById('btnCapture').addEventListener('click', () => {
     snapSrc.delete();
     snapDst.delete();
 
-    // 觸覺回饋 (手機振動)
     if (window.navigator.vibrate) window.navigator.vibrate(50);
+}
+
+document.getElementById('btnCapture').addEventListener('click', () => processAndSaveImage(video));
+
+// 圖片預覽縮圖按鈕 (左下角)
+document.getElementById('miniPreview').addEventListener('click', () => {
+    if (capturedPages.length > 0) showResultPanel();
+});
+
+// 相簿選取按鈕 (右上角)
+document.getElementById('btnGallery').addEventListener('click', () => {
+    document.getElementById('galleryInput').click();
+});
+
+document.getElementById('galleryInput').addEventListener('change', async (e) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    document.getElementById('statusText').innerText = "匯入處理中...";
+    for (let file of files) {
+        const img = await new Promise(resolve => {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const img = new Image();
+                img.onload = () => resolve(img);
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        });
+        processAndSaveImage(img);
+    }
+    document.getElementById('statusText').innerText = "匯入完成";
 });
 
 function updatePreview(dataUrl) {
@@ -177,26 +205,7 @@ function updatePreview(dataUrl) {
     badge.style.display = 'flex';
 }
 
-// 手電筒開關
-document.getElementById('btnTorch').addEventListener('click', async () => {
-    if (!stream) return;
-    const track = stream.getVideoTracks()[0];
-    const capabilities = track.getCapabilities();
-
-    if (capabilities.torch) {
-        torchOn = !torchOn;
-        try {
-            await track.applyConstraints({ advanced: [{ torch: torchOn }] });
-            document.getElementById('btnTorch').style.color = torchOn ? "#ffcc00" : "white";
-        } catch (e) { console.error("手電筒控制失敗", e); }
-    } else {
-        alert("此設備或瀏覽器不支援手電筒");
-    }
-});
-
-// 完成與匯出
-document.getElementById('btnDone').addEventListener('click', () => {
-    if (capturedPages.length === 0) return;
+function showResultPanel() {
     const list = document.getElementById('finalPreviewList');
     list.innerHTML = "";
     capturedPages.forEach(url => {
@@ -206,6 +215,24 @@ document.getElementById('btnDone').addEventListener('click', () => {
         list.appendChild(div);
     });
     document.getElementById('resultPanel').style.display = 'flex';
+}
+
+document.getElementById('btnDone').addEventListener('click', showResultPanel);
+
+// 手電筒開關
+document.getElementById('btnTorch').addEventListener('click', async () => {
+    if (!stream) return;
+    const track = stream.getVideoTracks()[0];
+    try {
+        const capabilities = track.getCapabilities();
+        if (capabilities.torch) {
+            torchOn = !torchOn;
+            await track.applyConstraints({ advanced: [{ torch: torchOn }] });
+            document.getElementById('btnTorch').style.color = torchOn ? "#ffcc00" : "white";
+        } else {
+            alert("此設備不支援手電筒");
+        }
+    } catch (e) { console.log(e); }
 });
 
 document.getElementById('exportPdf').addEventListener('click', () => {
