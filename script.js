@@ -5,12 +5,12 @@ let capturedPages = [];
 let torchOn = false;
 
 // OpenCV resources
-let src, gray, blurred, thresh, contours, hierarchy;
+let src, gray, blurred, edges, contours, hierarchy;
 let processCanvas;
 
 // Stability Smoothing
 let pointsBuffer = [];
-const BUFFER_SIZE = 8; // Increased buffer for better stability
+const BUFFER_SIZE = 5;
 let currentPoints = null;
 
 async function onOpenCvReady() {
@@ -34,14 +34,12 @@ async function startCamera() {
         video.onloadedmetadata = () => {
             overlay.width = window.innerWidth;
             overlay.height = window.innerHeight;
-
             src = new cv.Mat(300, 400, cv.CV_8UC4);
             gray = new cv.Mat();
             blurred = new cv.Mat();
-            thresh = new cv.Mat();
+            edges = new cv.Mat();
             contours = new cv.MatVector();
             hierarchy = new cv.Mat();
-
             requestAnimationFrame(detectionLoop);
         };
     } catch (err) {
@@ -62,72 +60,62 @@ function detectionLoop() {
         pCtx.drawImage(video, 0, 0, src.cols, src.rows);
         src.data.set(pCtx.getImageData(0, 0, src.cols, src.rows).data);
 
+        // 使用 Canny + Dilation，因為它比二值化更能處理各種背景
         cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
         cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
-        cv.threshold(blurred, thresh, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
-
-        let M = cv.Mat.ones(5, 5, cv.CV_8U);
-        cv.morphologyEx(thresh, thresh, cv.MORPH_CLOSE, M);
+        cv.Canny(blurred, edges, 50, 150);
+        let M = cv.Mat.ones(3, 3, cv.CV_8U);
+        cv.dilate(edges, edges, M);
         M.delete();
 
-        cv.findContours(thresh, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+        cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
         let maxArea = 0;
-        let bestApprox = null;
+        let bestPoly = null;
 
         for (let i = 0; i < contours.size(); ++i) {
             let cnt = contours.get(i);
             let area = cv.contourArea(cnt);
-            if (area > (src.cols * src.rows * 0.15)) { // Slightly higher area threshold
+            // 降低面積門檻到 3%，讓你可以在更遠的地方掃描
+            if (area > (src.cols * src.rows * 0.03)) {
                 let peri = cv.arcLength(cnt, true);
                 let approx = new cv.Mat();
                 cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
 
-                if (approx.rows === 4 && area > maxArea) {
+                // 不一定非要 4 個點，只要面積夠大，我們稍後會強制取最外圍四角
+                if (area > maxArea) {
                     maxArea = area;
-                    if (bestApprox) bestApprox.delete();
-                    bestApprox = approx;
+                    if (bestPoly) bestPoly.delete();
+                    bestPoly = approx;
                 } else {
                     approx.delete();
                 }
             }
         }
 
-        if (bestApprox) {
+        if (bestPoly) {
+            // 從偵測到的輪廓中強制找出最外圍的四個角點
             let rawPts = [];
-            for (let i = 0; i < 4; i++) {
-                rawPts.push({x: bestApprox.data32S[i * 2], y: bestApprox.data32S[i * 2 + 1]});
+            for (let i = 0; i < bestPoly.rows; i++) {
+                rawPts.push({x: bestApproxX(bestPoly, i), y: bestApproxY(bestPoly, i)});
             }
-            // Sort points: Top-Left, Top-Right, Bottom-Right, Bottom-Left
-            rawPts.sort((a, b) => a.y - b.y);
-            let top = rawPts.slice(0, 2).sort((a, b) => a.x - b.x);
-            let bottom = rawPts.slice(-2).sort((a, b) => b.x - a.x);
-            let sorted = [top[0], top[1], bottom[0], bottom[1]];
+
+            // 簡化為 4 個極端點：(x+y最小, x-y最大, x+y最大, x-y最小)
+            let sorted = getFourCorners(rawPts);
 
             pointsBuffer.push(sorted);
             if (pointsBuffer.length > BUFFER_SIZE) pointsBuffer.shift();
-
-            bestApprox.delete();
-        } else {
-            // Decay buffer slowly to avoid flickering
-            if (pointsBuffer.length > 0) pointsBuffer.shift();
+            bestPoly.delete();
         }
 
         oCtx.clearRect(0, 0, overlay.width, overlay.height);
 
-        if (pointsBuffer.length >= 3) { // Require at least 3 frames of stability
+        if (pointsBuffer.length > 0) {
             let avgPoints = [{x:0,y:0}, {x:0,y:0}, {x:0,y:0}, {x:0,y:0}];
             pointsBuffer.forEach(pts => {
-                pts.forEach((p, i) => {
-                    avgPoints[i].x += p.x;
-                    avgPoints[i].y += p.y;
-                });
+                pts.forEach((p, i) => { avgPoints[i].x += p.x; avgPoints[i].y += p.y; });
             });
-            avgPoints.forEach(p => {
-                p.x /= pointsBuffer.length;
-                p.y /= pointsBuffer.length;
-            });
-
+            avgPoints.forEach(p => { p.x /= pointsBuffer.length; p.y /= pointsBuffer.length; });
             currentPoints = avgPoints;
 
             const videoRatio = video.videoWidth / video.videoHeight;
@@ -145,33 +133,38 @@ function detectionLoop() {
 
             oCtx.strokeStyle = "#0071e3";
             oCtx.lineWidth = 6;
-            oCtx.lineJoin = "round";
             oCtx.beginPath();
             avgPoints.forEach((p, i) => {
                 let x = p.x * scaleX + offX;
                 let y = p.y * scaleY + offY;
-                if (i === 0) oCtx.moveTo(x, y);
-                else oCtx.lineTo(x, y);
+                if (i === 0) oCtx.moveTo(x, y); else oCtx.lineTo(x, y);
             });
             oCtx.closePath();
             oCtx.stroke();
 
             avgPoints.forEach(p => {
                 oCtx.fillStyle = "white";
-                oCtx.beginPath();
-                oCtx.arc(p.x * scaleX + offX, p.y * scaleY + offY, 8, 0, Math.PI*2);
-                oCtx.fill();
+                oCtx.beginPath(); oCtx.arc(p.x * scaleX + offX, p.y * scaleY + offY, 6, 0, Math.PI*2); oCtx.fill();
             });
-
-            document.getElementById('statusText').innerText = "已鎖定範圍";
-            document.getElementById('statusText').style.color = "#00ff00";
+            document.getElementById('statusText').innerText = "已偵測講義";
         } else {
-            document.getElementById('statusText').innerText = "正在搜尋講義...";
-            document.getElementById('statusText').style.color = "white";
+            document.getElementById('statusText').innerText = "搜尋中...";
             currentPoints = null;
         }
     } catch (e) {}
     requestAnimationFrame(detectionLoop);
+}
+
+function bestApproxX(poly, i) { return poly.data32S[i * 2]; }
+function bestApproxY(poly, i) { return poly.data32S[i * 2 + 1]; }
+
+function getFourCorners(pts) {
+    // 找出極端點：Top-Left (x+y min), Top-Right (x-y max), Bottom-Right (x+y max), Bottom-Left (x-y min)
+    let tl = pts.reduce((a, b) => (a.x + a.y < b.x + b.y ? a : b));
+    let tr = pts.reduce((a, b) => (a.x - a.y > b.x - b.y ? a : b));
+    let br = pts.reduce((a, b) => (a.x + a.y > b.x + b.y ? a : b));
+    let bl = pts.reduce((a, b) => (a.x - a.y < b.x - b.y ? a : b));
+    return [tl, tr, br, bl];
 }
 
 function captureImage() {
@@ -186,14 +179,16 @@ function captureImage() {
     let dstMat = new cv.Mat();
 
     if (currentPoints) {
+        // 加入 5% 的 Padding，防止邊緣被裁切掉
+        const padding = 20;
         const scaleX = video.videoWidth / 400;
         const scaleY = video.videoHeight / 300;
 
         let srcPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
-            currentPoints[0].x * scaleX, currentPoints[0].y * scaleY,
-            currentPoints[1].x * scaleX, currentPoints[1].y * scaleY,
-            currentPoints[2].x * scaleX, currentPoints[2].y * scaleY,
-            currentPoints[3].x * scaleX, currentPoints[3].y * scaleY
+            currentPoints[0].x * scaleX - padding, currentPoints[0].y * scaleY - padding,
+            currentPoints[1].x * scaleX + padding, currentPoints[1].y * scaleY - padding,
+            currentPoints[2].x * scaleX + padding, currentPoints[2].y * scaleY + padding,
+            currentPoints[3].x * scaleX - padding, currentPoints[3].y * scaleY + padding
         ]);
 
         const w = 1200; const h = 1600;
@@ -202,23 +197,17 @@ function captureImage() {
         let M = cv.getPerspectiveTransform(srcPts, dstPts);
         cv.warpPerspective(srcMat, dstMat, M, new cv.Size(w, h));
 
-        finalCanvas.width = w;
-        finalCanvas.height = h;
+        finalCanvas.width = w; finalCanvas.height = h;
         cv.imshow(finalCanvas, dstMat);
-
         srcPts.delete(); dstPts.delete(); M.delete();
     } else {
-        // Smart fallback: try to find a contour in the snapped high-res image
-        finalCanvas.width = canvas.width;
-        finalCanvas.height = canvas.height;
+        finalCanvas.width = canvas.width; finalCanvas.height = canvas.height;
         finalCanvas.getContext('2d').drawImage(canvas, 0, 0);
         dstMat = cv.imread(finalCanvas);
     }
 
     let grayMat = new cv.Mat();
-    if (dstMat.channels() > 1) cv.cvtColor(dstMat, grayMat, cv.COLOR_RGBA2GRAY);
-    else grayMat = dstMat.clone();
-
+    if (dstMat.channels() > 1) cv.cvtColor(dstMat, grayMat, cv.COLOR_RGBA2GRAY); else grayMat = dstMat.clone();
     cv.adaptiveThreshold(grayMat, grayMat, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 21, 15);
     cv.imshow(finalCanvas, grayMat);
 
@@ -234,8 +223,7 @@ document.getElementById('btnGallery').addEventListener('click', () => document.g
 
 function updatePreview(dataUrl) {
     const thumb = document.getElementById('lastScanThumb');
-    thumb.src = dataUrl;
-    thumb.style.display = 'block';
+    thumb.src = dataUrl; thumb.style.display = 'block';
     document.getElementById('pageCountBadge').innerText = capturedPages.length;
     document.getElementById('pageCountBadge').style.display = 'flex';
 }
@@ -246,8 +234,7 @@ function showResults() {
     list.innerHTML = "";
     capturedPages.forEach(url => {
         const div = document.createElement('div');
-        div.className = 'final-item';
-        div.innerHTML = `<img src="${url}">`;
+        div.className = 'final-item'; div.innerHTML = `<img src="${url}">`;
         list.appendChild(div);
     });
     document.getElementById('resultPanel').style.display = 'flex';
