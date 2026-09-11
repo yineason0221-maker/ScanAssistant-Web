@@ -5,8 +5,12 @@ let capturedPages = [];
 let torchOn = false;
 
 // OpenCV resources
-let src, gray, blurred, edges, contours, hierarchy;
+let src, gray, blurred, thresh, contours, hierarchy;
 let processCanvas;
+
+// Stability Smoothing
+let pointsBuffer = [];
+const BUFFER_SIZE = 8; // Increased buffer for better stability
 let currentPoints = null;
 
 async function onOpenCvReady() {
@@ -30,12 +34,14 @@ async function startCamera() {
         video.onloadedmetadata = () => {
             overlay.width = window.innerWidth;
             overlay.height = window.innerHeight;
+
             src = new cv.Mat(300, 400, cv.CV_8UC4);
             gray = new cv.Mat();
             blurred = new cv.Mat();
-            edges = new cv.Mat();
+            thresh = new cv.Mat();
             contours = new cv.MatVector();
             hierarchy = new cv.Mat();
+
             requestAnimationFrame(detectionLoop);
         };
     } catch (err) {
@@ -56,15 +62,15 @@ function detectionLoop() {
         pCtx.drawImage(video, 0, 0, src.cols, src.rows);
         src.data.set(pCtx.getImageData(0, 0, src.cols, src.rows).data);
 
-        // Advanced detection: Canny + Dilation
         cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
         cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
-        cv.Canny(blurred, edges, 75, 200);
-        let M = cv.Mat.ones(3, 3, cv.CV_8U);
-        cv.dilate(edges, edges, M);
+        cv.threshold(blurred, thresh, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+
+        let M = cv.Mat.ones(5, 5, cv.CV_8U);
+        cv.morphologyEx(thresh, thresh, cv.MORPH_CLOSE, M);
         M.delete();
 
-        cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+        cv.findContours(thresh, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
         let maxArea = 0;
         let bestApprox = null;
@@ -72,13 +78,12 @@ function detectionLoop() {
         for (let i = 0; i < contours.size(); ++i) {
             let cnt = contours.get(i);
             let area = cv.contourArea(cnt);
-            if (area > (src.cols * src.rows * 0.05)) {
+            if (area > (src.cols * src.rows * 0.15)) { // Slightly higher area threshold
                 let peri = cv.arcLength(cnt, true);
                 let approx = new cv.Mat();
                 cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
 
-                // If it's a quad, or we can simplify it to one
-                if (approx.rows >= 4 && area > maxArea) {
+                if (approx.rows === 4 && area > maxArea) {
                     maxArea = area;
                     if (bestApprox) bestApprox.delete();
                     bestApprox = approx;
@@ -88,10 +93,43 @@ function detectionLoop() {
             }
         }
 
-        oCtx.clearRect(0, 0, overlay.width, overlay.height);
-        currentPoints = null;
-
         if (bestApprox) {
+            let rawPts = [];
+            for (let i = 0; i < 4; i++) {
+                rawPts.push({x: bestApprox.data32S[i * 2], y: bestApprox.data32S[i * 2 + 1]});
+            }
+            // Sort points: Top-Left, Top-Right, Bottom-Right, Bottom-Left
+            rawPts.sort((a, b) => a.y - b.y);
+            let top = rawPts.slice(0, 2).sort((a, b) => a.x - b.x);
+            let bottom = rawPts.slice(-2).sort((a, b) => b.x - a.x);
+            let sorted = [top[0], top[1], bottom[0], bottom[1]];
+
+            pointsBuffer.push(sorted);
+            if (pointsBuffer.length > BUFFER_SIZE) pointsBuffer.shift();
+
+            bestApprox.delete();
+        } else {
+            // Decay buffer slowly to avoid flickering
+            if (pointsBuffer.length > 0) pointsBuffer.shift();
+        }
+
+        oCtx.clearRect(0, 0, overlay.width, overlay.height);
+
+        if (pointsBuffer.length >= 3) { // Require at least 3 frames of stability
+            let avgPoints = [{x:0,y:0}, {x:0,y:0}, {x:0,y:0}, {x:0,y:0}];
+            pointsBuffer.forEach(pts => {
+                pts.forEach((p, i) => {
+                    avgPoints[i].x += p.x;
+                    avgPoints[i].y += p.y;
+                });
+            });
+            avgPoints.forEach(p => {
+                p.x /= pointsBuffer.length;
+                p.y /= pointsBuffer.length;
+            });
+
+            currentPoints = avgPoints;
+
             const videoRatio = video.videoWidth / video.videoHeight;
             const screenRatio = window.innerWidth / window.innerHeight;
             let drawW, drawH, offX = 0, offY = 0;
@@ -102,24 +140,14 @@ function detectionLoop() {
                 drawH = window.innerHeight; drawW = window.innerHeight * videoRatio;
                 offX = (window.innerWidth - drawW) / 2;
             }
-
             const scaleX = drawW / src.cols;
             const scaleY = drawH / src.rows;
 
-            // Sort points: top-left, top-right, bottom-right, bottom-left
-            let pts = [];
-            for (let i = 0; i < bestApprox.rows; i++) {
-                pts.push({x: bestApprox.data32S[i * 2], y: bestApprox.data32S[i * 2 + 1]});
-            }
-            pts.sort((a, b) => a.y - b.y);
-            let top = pts.slice(0, 2).sort((a, b) => a.x - b.x);
-            let bottom = pts.slice(-2).sort((a, b) => b.x - a.x);
-            let sorted = [top[0], top[1], bottom[0], bottom[1]];
-
             oCtx.strokeStyle = "#0071e3";
-            oCtx.lineWidth = 5;
+            oCtx.lineWidth = 6;
+            oCtx.lineJoin = "round";
             oCtx.beginPath();
-            sorted.forEach((p, i) => {
+            avgPoints.forEach((p, i) => {
                 let x = p.x * scaleX + offX;
                 let y = p.y * scaleY + offY;
                 if (i === 0) oCtx.moveTo(x, y);
@@ -127,12 +155,20 @@ function detectionLoop() {
             });
             oCtx.closePath();
             oCtx.stroke();
-            currentPoints = sorted;
 
-            bestApprox.delete();
-            document.getElementById('statusText').innerText = "已鎖定講義";
+            avgPoints.forEach(p => {
+                oCtx.fillStyle = "white";
+                oCtx.beginPath();
+                oCtx.arc(p.x * scaleX + offX, p.y * scaleY + offY, 8, 0, Math.PI*2);
+                oCtx.fill();
+            });
+
+            document.getElementById('statusText').innerText = "已鎖定範圍";
+            document.getElementById('statusText').style.color = "#00ff00";
         } else {
             document.getElementById('statusText').innerText = "正在搜尋講義...";
+            document.getElementById('statusText').style.color = "white";
+            currentPoints = null;
         }
     } catch (e) {}
     requestAnimationFrame(detectionLoop);
@@ -149,7 +185,7 @@ function captureImage() {
     let srcMat = cv.imread(canvas);
     let dstMat = new cv.Mat();
 
-    if (currentPoints && currentPoints.length >= 4) {
+    if (currentPoints) {
         const scaleX = video.videoWidth / 400;
         const scaleY = video.videoHeight / 300;
 
@@ -172,12 +208,10 @@ function captureImage() {
 
         srcPts.delete(); dstPts.delete(); M.delete();
     } else {
-        // Fallback: take center part if detection fails
-        const w = canvas.width;
-        const h = canvas.height;
-        finalCanvas.width = w * 0.9;
-        finalCanvas.height = h * 0.9;
-        finalCanvas.getContext('2d').drawImage(canvas, w*0.05, h*0.05, w*0.9, h*0.9, 0, 0, w*0.9, h*0.9);
+        // Smart fallback: try to find a contour in the snapped high-res image
+        finalCanvas.width = canvas.width;
+        finalCanvas.height = canvas.height;
+        finalCanvas.getContext('2d').drawImage(canvas, 0, 0);
         dstMat = cv.imread(finalCanvas);
     }
 
