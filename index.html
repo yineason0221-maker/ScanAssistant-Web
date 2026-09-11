@@ -2,36 +2,54 @@
 <html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>掃描講義助手 - Web版</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>講義掃描助手 Pro</title>
     <link rel="stylesheet" href="style.css">
-    <!-- 引入 jsPDF 用於生成 PDF -->
+    <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-    <!-- 引入 OpenCV.js 用於影像處理 (去陰影、邊緣偵測) -->
-    <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+    <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();"></script>
 </head>
 <body>
-    <div class="container">
-        <h1>講義掃描助手</h1>
-        <p>上傳講義照片，自動去陰影並轉成 PDF</p>
+    <div id="app">
+        <!-- 相機預覽層 -->
+        <div id="cameraView">
+            <video id="video" autoplay playsinline></video>
+            <canvas id="overlay"></canvas>
 
-        <div class="upload-section">
-            <input type="file" id="imageInput" accept="image/*" multiple>
-            <label for="imageInput" class="btn">選擇講義圖片</label>
+            <!-- 頂部控制列 -->
+            <div class="top-bar">
+                <button id="btnTorch"><span class="material-icons">flashlight_on</span></button>
+                <div id="statusText">系統載入中...</div>
+                <button id="btnGallery"><span class="material-icons">photo_library</span></button>
+            </div>
+
+            <!-- 底部拍照按鈕 -->
+            <div class="bottom-bar">
+                <div class="preview-thumbnail" id="miniPreview">
+                    <img id="lastScanThumb" src="" style="display: none;">
+                    <span id="pageCountBadge" style="display: none;">0</span>
+                </div>
+                <button id="btnCapture">
+                    <div class="inner-circle"></div>
+                </button>
+                <button id="btnDone"><span class="material-icons">check_circle</span></button>
+            </div>
         </div>
 
-        <div id="status">OpenCV 載入中...</div>
+        <!-- 結果處理層 (隱藏) -->
+        <canvas id="processCanvas" style="display: none;"></canvas>
 
-        <div id="previewContainer">
-            <!-- 預覽處理後的圖片 -->
+        <!-- 下載清單面版 (點擊 Done 後顯示) -->
+        <div id="resultPanel" class="modal" style="display: none;">
+            <div class="modal-content">
+                <h2>掃描完成</h2>
+                <div id="finalPreviewList"></div>
+                <div class="modal-actions">
+                    <button id="exportPdf" class="btn primary">儲存為 PDF</button>
+                    <button id="closeModal" class="btn">返回</button>
+                </div>
+            </div>
         </div>
-
-        <div class="controls" style="display: none;">
-            <button id="downloadPdf" class="btn primary">匯出 PDF</button>
-            <button id="downloadImages" class="btn secondary">下載所有單張圖片</button>
-        </div>
-
-        <canvas id="canvasOutput" style="display: none;"></canvas>
     </div>
     <script src="script.js"></script>
 </body>

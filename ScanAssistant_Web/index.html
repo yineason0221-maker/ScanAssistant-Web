@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>掃描講義助手 - Web版</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- 引入 jsPDF 用於生成 PDF -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <!-- 引入 OpenCV.js 用於影像處理 (去陰影、邊緣偵測) -->
+    <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>講義掃描助手</h1>
+        <p>上傳講義照片，自動去陰影並轉成 PDF</p>
+
+        <div class="upload-section">
+            <input type="file" id="imageInput" accept="image/*" multiple>
+            <label for="imageInput" class="btn">選擇講義圖片</label>
+        </div>
+
+        <div id="status">OpenCV 載入中...</div>
+
+        <div id="previewContainer">
+            <!-- 預覽處理後的圖片 -->
+        </div>
+
+        <div class="controls" style="display: none;">
+            <button id="downloadPdf" class="btn primary">匯出 PDF</button>
+            <button id="downloadImages" class="btn secondary">下載所有單張圖片</button>
+        </div>
+
+        <canvas id="canvasOutput" style="display: none;"></canvas>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
